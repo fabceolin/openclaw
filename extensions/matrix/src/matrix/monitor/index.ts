@@ -164,7 +164,6 @@ export async function monitorMatrixProvider(opts: MonitorMatrixOpts = {}): Promi
     }
   };
 
-  const mentionRegexes = core.channel.mentions.buildMentionRegexes(cfg);
   const defaultGroupPolicy = resolveDefaultGroupPolicy(cfg);
   const { groupPolicy: groupPolicyRaw, providerMissingFallbackApplied } =
     resolveAllowlistProviderRuntimeGroupPolicy({
@@ -199,6 +198,8 @@ export async function monitorMatrixProvider(opts: MonitorMatrixOpts = {}): Promi
   const textLimit = core.channel.text.resolveTextChunkLimit(cfg, "matrix", account.accountId);
   const mediaMaxMb = opts.mediaMaxMb ?? accountConfig.mediaMaxMb ?? DEFAULT_MEDIA_MAX_MB;
   const mediaMaxBytes = Math.max(1, mediaMaxMb) * 1024 * 1024;
+  const streaming: "partial" | "off" =
+    accountConfig.streaming === true || accountConfig.streaming === "partial" ? "partial" : "off";
   const startupMs = Date.now();
   const startupGraceMs = 0;
   // Cold starts should ignore old room history, but once we have a persisted
@@ -223,10 +224,10 @@ export async function monitorMatrixProvider(opts: MonitorMatrixOpts = {}): Promi
     roomsConfig,
     accountAllowBots,
     configuredBotUserIds,
-    mentionRegexes,
     groupPolicy,
     replyToMode,
     threadReplies,
+    streaming,
     dmEnabled,
     dmPolicy,
     textLimit,

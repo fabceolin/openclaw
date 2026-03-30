@@ -26,10 +26,11 @@ type MatrixHandlerTestHarnessOptions = {
   roomsConfig?: Record<string, MatrixRoomConfig>;
   accountAllowBots?: boolean | "mentions";
   configuredBotUserIds?: Set<string>;
-  mentionRegexes?: MatrixMonitorHandlerParams["mentionRegexes"];
+  mentionRegexes?: RegExp[];
   groupPolicy?: "open" | "allowlist" | "disabled";
   replyToMode?: ReplyToMode;
   threadReplies?: "off" | "inbound" | "always";
+  streaming?: "partial" | "off";
   dmEnabled?: boolean;
   dmPolicy?: "pairing" | "allowlist" | "open" | "disabled";
   textLimit?: number;
@@ -206,10 +207,10 @@ export function createMatrixHandlerTestHarness(
     roomsConfig: options.roomsConfig,
     accountAllowBots: options.accountAllowBots,
     configuredBotUserIds: options.configuredBotUserIds,
-    mentionRegexes: options.mentionRegexes ?? [],
     groupPolicy: options.groupPolicy ?? "open",
     replyToMode: options.replyToMode ?? "off",
     threadReplies: options.threadReplies ?? "inbound",
+    streaming: options.streaming ?? "off",
     dmEnabled: options.dmEnabled ?? true,
     dmPolicy: options.dmPolicy ?? "open",
     textLimit: options.textLimit ?? 8_000,

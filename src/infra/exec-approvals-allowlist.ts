@@ -1,4 +1,5 @@
 import path from "node:path";
+import { isDispatchWrapperExecutable } from "./dispatch-wrapper-resolution.js";
 import {
   analyzeShellCommand,
   isWindowsPlatform,
@@ -14,6 +15,7 @@ import {
   type ExecutableResolution,
 } from "./exec-approvals-analysis.js";
 import type { ExecAllowlistEntry } from "./exec-approvals.js";
+import { isInterpreterLikeAllowlistPattern } from "./exec-inline-eval.js";
 import {
   DEFAULT_SAFE_BINS,
   SAFE_BIN_PROFILES,
@@ -463,6 +465,13 @@ function resolveShellWrapperPositionalArgvCandidatePath(params: {
     return undefined;
   }
 
+  // Reject wrapper targets carried through `$0 "$@"` because their trailing argv can
+  // widen execution semantics beyond the original approved command.
+  const carriedName = normalizeExecutableToken(carriedExecutable);
+  if (isDispatchWrapperExecutable(carriedName) || isShellWrapperExecutable(carriedName)) {
+    return undefined;
+  }
+
   const resolution = resolveCommandResolutionFromArgv([carriedExecutable], params.cwd, params.env);
   return resolveExecutionTargetCandidatePath(resolution, params.cwd);
 }
@@ -513,6 +522,9 @@ function collectAllowAlwaysPatterns(params: {
   if (!candidatePath) {
     return;
   }
+  if (isInterpreterLikeAllowlistPattern(candidatePath)) {
+    return;
+  }
   if (!trustPlan.shellWrapperExecutable) {
     params.out.add(candidatePath);
     return;
@@ -523,6 +535,9 @@ function collectAllowAlwaysPatterns(params: {
     env: params.env,
   });
   if (positionalArgvPath) {
+    if (isInterpreterLikeAllowlistPattern(positionalArgvPath)) {
+      return;
+    }
     params.out.add(positionalArgvPath);
     return;
   }
