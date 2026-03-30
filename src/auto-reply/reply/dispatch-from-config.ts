@@ -431,16 +431,46 @@ export async function dispatchReplyFromConfig(params: {
   }
 
   // Bridge to internal hooks (HOOK.md discovery system) - refs #8807
-  if (sessionKey) {
-    fireAndForgetHook(
-      triggerInternalHook(
-        createInternalHookEvent("message", "received", sessionKey, {
-          ...toInternalMessageReceivedContext(hookContext),
-          timestamp,
-        }),
-      ),
-      "dispatch-from-config: message_received internal hook failed",
-    );
+  // Use a fallback key when no session is resolved so passive hooks
+  // (e.g. message loggers) still fire for unrouted messages.
+  fireAndForgetHook(
+    triggerInternalHook(
+      createInternalHookEvent("message", "received", sessionKey || "unrouted", {
+        ...toInternalMessageReceivedContext(hookContext),
+        timestamp,
+      }),
+    ),
+    "dispatch-from-config: message_received internal hook failed",
+  );
+
+  // Hook-only commands: fire hooks above but skip agent processing.
+  // Commands listed here are handled entirely by internal hooks (HOOK.md handlers).
+  // Reads from ~/.openclaw/hook-only-commands.json (a JSON array of command prefixes).
+  {
+    const body = (ctx.BodyForCommands ?? ctx.RawBody ?? ctx.Body ?? "").trim().toLowerCase();
+    if (body.startsWith("/")) {
+      try {
+        const fs = await import("node:fs");
+        const path = await import("node:path");
+        const os = await import("node:os");
+        const stateDir =
+          process.env.OPENCLAW_STATE_DIR || path.default.join(os.default.homedir(), ".openclaw");
+        const filePath = path.default.join(stateDir, "hook-only-commands.json");
+        const raw = fs.default.readFileSync(filePath, "utf-8");
+        const prefixes = JSON.parse(raw) as string[];
+        // Match /kea or /kea@botname (strip @botname before matching)
+        const bodyClean = body.replace(/@\S+/, "");
+        const isHookOnly = prefixes.some((p: string) => bodyClean.startsWith(p.toLowerCase()));
+        if (isHookOnly) {
+          logVerbose(`dispatch-from-config: hook-only command "${body}" — skipping agent`);
+          recordProcessed("completed", { reason: "hook_only_command" });
+          markIdle("message_completed");
+          return { queuedFinal: false, counts: dispatcher.getQueuedCounts() };
+        }
+      } catch {
+        // File not found or parse error — proceed normally
+      }
+    }
   }
 
   markProcessing();

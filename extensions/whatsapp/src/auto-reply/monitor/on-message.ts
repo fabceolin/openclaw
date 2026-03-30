@@ -1,3 +1,6 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { loadConfig } from "openclaw/plugin-sdk/config-runtime";
 import type { getReplyFromConfig } from "openclaw/plugin-sdk/reply-runtime";
 import type { MsgContext } from "openclaw/plugin-sdk/reply-runtime";
@@ -15,6 +18,49 @@ import { applyGroupGating } from "./group-gating.js";
 import { updateLastRouteInBackground } from "./last-route.js";
 import { resolvePeerId } from "./peer.js";
 import { processMessage } from "./process-message.js";
+
+// ---------------------------------------------------------------------------
+// Passive JSONL message logger – captures every inbound message before gating.
+// Output: $OPENCLAW_STATE_DIR/logs/messages/YYYY-MM-DD.jsonl
+// ---------------------------------------------------------------------------
+const MESSAGE_LOG_DIR = path.join(
+  process.env.OPENCLAW_STATE_DIR ?? path.join(os.homedir(), ".openclaw"),
+  "logs",
+  "messages",
+);
+let logDirReady = false;
+
+async function logMessageToJsonl(msg: WebInboundMsg): Promise<void> {
+  try {
+    if (!logDirReady) {
+      await fs.mkdir(MESSAGE_LOG_DIR, { recursive: true });
+      logDirReady = true;
+    }
+    const sender = getSenderIdentity(msg);
+    const rawTs = msg.timestamp ?? Date.now();
+    // Baileys timestamps may be seconds or milliseconds; normalize to ms.
+    const ms = typeof rawTs === "number" && rawTs < 1e12 ? rawTs * 1000 : rawTs;
+    const now = new Date(ms);
+    const entry = {
+      ts: now.toISOString(),
+      channel: "whatsapp",
+      from: sender.e164 ?? msg.from ?? "unknown",
+      fromName: sender.name ?? "",
+      group: msg.groupSubject ?? "",
+      groupId: msg.chatType === "group" ? (msg.conversationId ?? msg.from ?? "") : "",
+      text: msg.body ?? "",
+      messageId: msg.id ?? "",
+    };
+    const dateStr = now.toISOString().slice(0, 10);
+    await fs.appendFile(
+      path.join(MESSAGE_LOG_DIR, `${dateStr}.jsonl`),
+      JSON.stringify(entry) + "\n",
+      "utf-8",
+    );
+  } catch (err) {
+    console.error(`[wa-jsonl] capture error: ${err instanceof Error ? err.message : err}`);
+  }
+}
 
 export function createWebOnMessageHandler(params: {
   cfg: ReturnType<typeof loadConfig>;
@@ -95,6 +141,10 @@ export function createWebOnMessageHandler(params: {
       params.echoTracker.forget(msg.body);
       return;
     }
+
+    // Passive JSONL capture – runs before any gating so every inbound
+    // message is recorded regardless of allowlist / mention rules.
+    logMessageToJsonl(msg).catch(() => {});
 
     if (msg.chatType === "group") {
       const sender = getSenderIdentity(msg);
