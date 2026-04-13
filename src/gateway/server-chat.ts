@@ -613,13 +613,15 @@ export function createAgentEventHandler({
         timestamp: now,
       },
     };
-    // final-only mode: buffer the latest text per-session (overwriting previous
-    // iteration's text) and DO NOT broadcast deltas to WS clients. The buffered
-    // text will be flushed as a single "final" message when lifecycle=end arrives.
+    // final-only mode: buffer the LATEST LLM iteration's text per-session.
+    // We use `cleanedText` (the raw total of the current LLM message) rather
+    // than `mergedText` (which accumulates across iterations). This way, when
+    // a new LLM iteration starts emitting a fresh message, the buffer is
+    // replaced instead of concatenated.
     if (resolveChatDeliveryMode() === "final-only") {
       chatRunState.turnBuffer.set(sessionKey, {
         clientRunId,
-        text: mergedText,
+        text: cleanedText || mergedText,
         seq,
         sourceRunId,
       });
@@ -713,14 +715,51 @@ export function createAgentEventHandler({
     chatRunState.buffers.delete(clientRunId);
     chatRunState.deltaSentAt.delete(clientRunId);
     if (jobState === "done") {
-      // In final-only mode: use the LAST buffered text for this session (which reflects
-      // the last LLM iteration's output, overwriting intermediate reasoning/planning text).
-      // Fall back to the per-runId buffered text if no turn buffer exists for this session.
-      const turnEntry = deliveryMode === "final-only" ? chatRunState.turnBuffer.get(sessionKey) : undefined;
-      const text = turnEntry?.text ?? bufferedText;
-      const shouldSuppressSilent = turnEntry ? isSilentReplyText(text, SILENT_REPLY_TOKEN) : bufferedSuppress;
       if (deliveryMode === "final-only") {
+        // Only "end_turn" (and related terminal reasons) signal the real end of the
+        // user's turn. "tool_use" means more LLM iterations are coming — we must NOT
+        // broadcast anything to the client yet, just keep the turnBuffer as-is.
+        const isTurnEnd =
+          !stopReason ||
+          stopReason === "end_turn" ||
+          stopReason === "stop_sequence" ||
+          stopReason === "max_tokens" ||
+          stopReason === "refusal";
+        if (!isTurnEnd) {
+          // Intermediate iteration — keep buffering, don't broadcast.
+          const bufferedPayload = {
+            runId: clientRunId,
+            sessionKey,
+            seq,
+            state: "final" as const,
+            ...(stopReason && { stopReason }),
+          };
+          nodeSendToSession(sessionKey, "chat", bufferedPayload);
+          return;
+        }
+        // End of turn — emit the turnBuffer text (which holds the LAST LLM iteration's text).
+        const turnEntry = chatRunState.turnBuffer.get(sessionKey);
+        const text = turnEntry?.text ?? bufferedText;
+        const shouldSuppressSilent = text ? isSilentReplyText(text, SILENT_REPLY_TOKEN) : true;
         chatRunState.turnBuffer.delete(sessionKey);
+        const payload = {
+          runId: clientRunId,
+          sessionKey,
+          seq,
+          state: "final" as const,
+          ...(stopReason && { stopReason }),
+          message:
+            text && !shouldSuppressSilent
+              ? {
+                  role: "assistant",
+                  content: [{ type: "text", text }],
+                  timestamp: Date.now(),
+                }
+              : undefined,
+        };
+        broadcast("chat", payload);
+        nodeSendToSession(sessionKey, "chat", payload);
+        return;
       }
       const payload = {
         runId: clientRunId,
@@ -729,10 +768,10 @@ export function createAgentEventHandler({
         state: "final" as const,
         ...(stopReason && { stopReason }),
         message:
-          text && !shouldSuppressSilent
+          bufferedText && !bufferedSuppress
             ? {
                 role: "assistant",
-                content: [{ type: "text", text }],
+                content: [{ type: "text", text: bufferedText }],
                 timestamp: Date.now(),
               }
             : undefined,
