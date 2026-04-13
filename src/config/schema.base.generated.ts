@@ -10055,6 +10055,24 @@ export const GENERATED_BASE_CONFIG_SCHEMA = {
             },
             additionalProperties: false,
           },
+          chat: {
+            type: "object",
+            properties: {
+              deliveryMode: {
+                anyOf: [
+                  {
+                    type: "string",
+                    const: "stream",
+                  },
+                  {
+                    type: "string",
+                    const: "final-only",
+                  },
+                ],
+              },
+            },
+            additionalProperties: false,
+          },
           auth: {
             type: "object",
             properties: {
