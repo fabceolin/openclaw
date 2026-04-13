@@ -24,6 +24,21 @@ function resolveHeartbeatAckMaxChars(): number {
   }
 }
 
+/**
+ * Resolves the chat delivery mode from gateway config.
+ * - "stream" (default): broadcast deltas/finals from every LLM iteration.
+ * - "final-only": buffer per-turn and emit only the last iteration's text at lifecycle=end.
+ */
+function resolveChatDeliveryMode(): "stream" | "final-only" {
+  try {
+    const cfg = loadConfig();
+    const mode = (cfg.gateway as { chat?: { deliveryMode?: string } })?.chat?.deliveryMode;
+    return mode === "final-only" ? "final-only" : "stream";
+  } catch {
+    return "stream";
+  }
+}
+
 function resolveHeartbeatContext(runId: string, sourceRunId?: string) {
   const primary = getAgentRunContext(runId);
   if (primary?.isHeartbeat) {
@@ -200,6 +215,19 @@ export function createChatRunRegistry(): ChatRunRegistry {
   return { add, peek, shift, remove, clear };
 }
 
+/**
+ * Per-turn buffer entry used when gateway.chat.deliveryMode === "final-only".
+ * Keyed by sessionKey. Stores the text of the LAST seen assistant clientRunId.
+ * When a new clientRunId arrives for the same session, the previous entry is
+ * overwritten (intermediate iterations are discarded).
+ */
+export type TurnBufferEntry = {
+  clientRunId: string;
+  text: string;
+  seq: number;
+  sourceRunId: string;
+};
+
 export type ChatRunState = {
   registry: ChatRunRegistry;
   buffers: Map<string, string>;
@@ -207,6 +235,8 @@ export type ChatRunState = {
   /** Length of text at the time of the last broadcast, used to avoid duplicate flushes. */
   deltaLastBroadcastLen: Map<string, number>;
   abortedRuns: Map<string, number>;
+  /** Per-session buffer for "final-only" delivery mode. */
+  turnBuffer: Map<string, TurnBufferEntry>;
   clear: () => void;
 };
 
@@ -216,6 +246,7 @@ export function createChatRunState(): ChatRunState {
   const deltaSentAt = new Map<string, number>();
   const deltaLastBroadcastLen = new Map<string, number>();
   const abortedRuns = new Map<string, number>();
+  const turnBuffer = new Map<string, TurnBufferEntry>();
 
   const clear = () => {
     registry.clear();
@@ -223,6 +254,7 @@ export function createChatRunState(): ChatRunState {
     deltaSentAt.clear();
     deltaLastBroadcastLen.clear();
     abortedRuns.clear();
+    turnBuffer.clear();
   };
 
   return {
@@ -231,6 +263,7 @@ export function createChatRunState(): ChatRunState {
     deltaSentAt,
     deltaLastBroadcastLen,
     abortedRuns,
+    turnBuffer,
     clear,
   };
 }
@@ -580,6 +613,19 @@ export function createAgentEventHandler({
         timestamp: now,
       },
     };
+    // final-only mode: buffer the latest text per-session (overwriting previous
+    // iteration's text) and DO NOT broadcast deltas to WS clients. The buffered
+    // text will be flushed as a single "final" message when lifecycle=end arrives.
+    if (resolveChatDeliveryMode() === "final-only") {
+      chatRunState.turnBuffer.set(sessionKey, {
+        clientRunId,
+        text: mergedText,
+        seq,
+        sourceRunId,
+      });
+      nodeSendToSession(sessionKey, "chat", payload);
+      return;
+    }
     broadcast("chat", payload, { dropIfSlow: true });
     nodeSendToSession(sessionKey, "chat", payload);
   };
@@ -652,16 +698,30 @@ export function createAgentEventHandler({
     error?: unknown,
     stopReason?: string,
   ) => {
-    const { text, shouldSuppressSilent } = resolveBufferedChatTextState(clientRunId, sourceRunId);
+    const deliveryMode = resolveChatDeliveryMode();
+    const { text: bufferedText, shouldSuppressSilent: bufferedSuppress } =
+      resolveBufferedChatTextState(clientRunId, sourceRunId);
     // Flush any throttled delta so streaming clients receive the complete text
     // before the final event. The 150 ms throttle in emitChatDelta may have
     // suppressed the most recent chunk, leaving the client with stale text.
     // Only flush if the buffer has grown since the last broadcast to avoid duplicates.
-    flushBufferedChatDeltaIfNeeded(sessionKey, clientRunId, sourceRunId, seq);
+    // In final-only mode, skip the flush (we buffer everything and emit one final below).
+    if (deliveryMode !== "final-only") {
+      flushBufferedChatDeltaIfNeeded(sessionKey, clientRunId, sourceRunId, seq);
+    }
     chatRunState.deltaLastBroadcastLen.delete(clientRunId);
     chatRunState.buffers.delete(clientRunId);
     chatRunState.deltaSentAt.delete(clientRunId);
     if (jobState === "done") {
+      // In final-only mode: use the LAST buffered text for this session (which reflects
+      // the last LLM iteration's output, overwriting intermediate reasoning/planning text).
+      // Fall back to the per-runId buffered text if no turn buffer exists for this session.
+      const turnEntry = deliveryMode === "final-only" ? chatRunState.turnBuffer.get(sessionKey) : undefined;
+      const text = turnEntry?.text ?? bufferedText;
+      const shouldSuppressSilent = turnEntry ? isSilentReplyText(text, SILENT_REPLY_TOKEN) : bufferedSuppress;
+      if (deliveryMode === "final-only") {
+        chatRunState.turnBuffer.delete(sessionKey);
+      }
       const payload = {
         runId: clientRunId,
         sessionKey,
@@ -845,6 +905,9 @@ export function createAgentEventHandler({
         chatRunState.abortedRuns.delete(evt.runId);
         chatRunState.buffers.delete(clientRunId);
         chatRunState.deltaSentAt.delete(clientRunId);
+        if (sessionKey) {
+          chatRunState.turnBuffer.delete(sessionKey);
+        }
         if (chatLink) {
           chatRunState.registry.remove(evt.runId, clientRunId, sessionKey);
         }

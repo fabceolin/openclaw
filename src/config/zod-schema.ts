@@ -684,6 +684,19 @@ export const OpenClawSchema = z
           })
           .strict()
           .optional(),
+        chat: z
+          .object({
+            /**
+             * Controls how chat assistant text is delivered to WebSocket clients.
+             * - "stream" (default): broadcast deltas and finals from every LLM iteration.
+             * - "final-only": buffer deltas/finals per turn and broadcast only the LAST
+             *   iteration's text when the agent lifecycle ends. Useful to hide intermediate
+             *   reasoning/planning text that the model emits between tool calls.
+             */
+            deliveryMode: z.union([z.literal("stream"), z.literal("final-only")]).optional(),
+          })
+          .strict()
+          .optional(),
         auth: z
           .object({
             mode: z
