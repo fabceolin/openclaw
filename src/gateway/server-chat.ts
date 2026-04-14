@@ -483,6 +483,12 @@ export type AgentEventHandlerOptions = {
   clearAgentRunContext: (runId: string) => void;
   toolEventRecipients: ToolEventRecipientRegistry;
   sessionEventSubscribers: SessionEventSubscriberRegistry;
+  /**
+   * Registry of WS conn IDs that have subscribed to specific sessions.
+   * Used to scope chat events to the session owner instead of broadcasting
+   * to all connected clients.
+   */
+  sessionMessageSubscribers?: SessionMessageSubscriberRegistry;
 };
 
 export function createAgentEventHandler({
@@ -495,7 +501,25 @@ export function createAgentEventHandler({
   clearAgentRunContext,
   toolEventRecipients,
   sessionEventSubscribers,
+  sessionMessageSubscribers,
 }: AgentEventHandlerOptions) {
+  /**
+   * Broadcast a chat event scoped to subscribers of the given sessionKey.
+   * Falls back to global broadcast if no subscribers exist (preserves
+   * legacy behavior for control UIs that expect all events).
+   */
+  const broadcastChat = (
+    sessionKey: string,
+    payload: unknown,
+    opts?: { dropIfSlow?: boolean },
+  ) => {
+    const subscribers = sessionMessageSubscribers?.get(sessionKey);
+    if (subscribers && subscribers.size > 0) {
+      broadcastToConnIds("chat", payload, subscribers, opts);
+      return;
+    }
+    broadcast("chat", payload, opts);
+  };
   const buildSessionEventSnapshot = (sessionKey: string, evt?: AgentEventPayload) => {
     const row = loadGatewaySessionRow(sessionKey);
     const lifecyclePatch = evt
@@ -628,7 +652,7 @@ export function createAgentEventHandler({
       nodeSendToSession(sessionKey, "chat", payload);
       return;
     }
-    broadcast("chat", payload, { dropIfSlow: true });
+    broadcastChat(sessionKey, payload, { dropIfSlow: true });
     nodeSendToSession(sessionKey, "chat", payload);
   };
 
@@ -685,7 +709,7 @@ export function createAgentEventHandler({
         timestamp: now,
       },
     };
-    broadcast("chat", flushPayload, { dropIfSlow: true });
+    broadcastChat(sessionKey, flushPayload, { dropIfSlow: true });
     nodeSendToSession(sessionKey, "chat", flushPayload);
     chatRunState.deltaLastBroadcastLen.set(clientRunId, text.length);
     chatRunState.deltaSentAt.set(clientRunId, now);
@@ -757,7 +781,7 @@ export function createAgentEventHandler({
                 }
               : undefined,
         };
-        broadcast("chat", payload);
+        broadcastChat(sessionKey, payload);
         nodeSendToSession(sessionKey, "chat", payload);
         return;
       }
@@ -776,7 +800,7 @@ export function createAgentEventHandler({
               }
             : undefined,
       };
-      broadcast("chat", payload);
+      broadcastChat(sessionKey, payload);
       nodeSendToSession(sessionKey, "chat", payload);
       return;
     }
@@ -787,7 +811,7 @@ export function createAgentEventHandler({
       state: "error" as const,
       errorMessage: error ? formatForLog(error) : undefined,
     };
-    broadcast("chat", payload);
+    broadcastChat(sessionKey, payload);
     nodeSendToSession(sessionKey, "chat", payload);
   };
 

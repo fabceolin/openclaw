@@ -934,6 +934,7 @@ export async function startGatewayServer(
             clearAgentRunContext,
             toolEventRecipients,
             sessionEventSubscribers,
+            sessionMessageSubscribers,
           }),
         );
 
