@@ -619,6 +619,19 @@ export function createAgentEventHandler({
     if (shouldHideHeartbeatChatOutput(clientRunId, sourceRunId)) {
       return;
     }
+    // final-only mode: ALWAYS update the turnBuffer with the latest text,
+    // regardless of the 150ms throttle below. The turnBuffer must track the
+    // complete accumulated text so that emitChatFinal can broadcast it in full.
+    // Previously this was after the throttle gate, causing truncated final text
+    // when the last deltas arrived within the 150ms window.
+    if (resolveChatDeliveryMode() === "final-only") {
+      chatRunState.turnBuffer.set(sessionKey, {
+        clientRunId,
+        text: cleanedText || mergedText,
+        seq,
+        sourceRunId,
+      });
+    }
     const now = Date.now();
     const last = chatRunState.deltaSentAt.get(clientRunId) ?? 0;
     if (now - last < 150) {
@@ -637,18 +650,7 @@ export function createAgentEventHandler({
         timestamp: now,
       },
     };
-    // final-only mode: buffer the LATEST LLM iteration's text per-session.
-    // We use `cleanedText` (the raw total of the current LLM message) rather
-    // than `mergedText` (which accumulates across iterations). This way, when
-    // a new LLM iteration starts emitting a fresh message, the buffer is
-    // replaced instead of concatenated.
     if (resolveChatDeliveryMode() === "final-only") {
-      chatRunState.turnBuffer.set(sessionKey, {
-        clientRunId,
-        text: cleanedText || mergedText,
-        seq,
-        sourceRunId,
-      });
       nodeSendToSession(sessionKey, "chat", payload);
       return;
     }
